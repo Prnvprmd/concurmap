@@ -1,0 +1,8 @@
+*.o
+*.cjo
+*.bchir2
+out
+main
+.vscode
+samples/*
+test.sh
