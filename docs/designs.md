@@ -34,10 +34,7 @@
         - Put inserts the element directly into the 2nd table when expanding is in progress.
 - FNV1A hashing algo used
 
-Tests: Fails, deadlocks during parallelPerformanceTest and parallelStressTest. Also fails with OOM, not always reproducible.
-
 ### V5
-
 
 - Based upon the previous design. Open addressing with fine grained mutex locks for each bucket/Key-Value pair.
 - Inspired by Redis' design, here the table is not Globally Locked when expanding/rehashing.
@@ -48,8 +45,11 @@ Tests: Fails, deadlocks during parallelPerformanceTest and parallelStressTest. A
         - Put inserts the element directly into the 2nd table when expanding is in progress.
 - FNV1A hashing algo used
 
-Tests: Passes most of the times. Deadlocks very rarely during parallelPerformanceTest and parallelStressTest. Not exactly reproducible.
+### V6
 
+- A basic closed chaining implementation with fine grained mutex locks for each bucket.
+- When expanding, Atomic flag is set to signify the same, which blocks put and get operation until expansion is complete
+- FNV1A hashing algo used
 
 ---------------------
 
@@ -62,3 +62,4 @@ Tests: Passes most of the times. Deadlocks very rarely during parallelPerformanc
 - V3 - Deadlocks
 - V4p1 - Deadlocks, possible OOM after that
 - V5 - OOM
+- V6 - Passes all tests
