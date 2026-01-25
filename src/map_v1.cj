@@ -74,17 +74,18 @@ class KeyValueV1 <: CustomMap  {
         var new_capacity = Int64(Float32(capacity) * expansion_rate);
         length.store(0);
         new_table = ArrayList<NodeV1>(new_capacity, {x : Int64 => NodeV1("", 0)});
-        for(item in table) {
-                if (item.getKey() == "") { continue }
-                var key = item.getKey();
-                var val = item.getValue();
-                var idx: Int64 = Int64(hash_function(key) % UInt64(new_capacity));
-                while(new_table[idx].getKey() != "") {
-                    idx++;
-                    if(idx >= new_capacity) {idx = 0;}
-                }
-                new_table[idx] = NodeV1(key, val);
-                length.fetchAdd(1);
+        for(i in 0..table.size) {
+            let item = table[i]
+            if (item.getKey() == "") { continue }
+            var key = item.getKey();
+            var val = item.getValue();
+            var idx: Int64 = Int64(hash_function(key) % UInt64(new_capacity));
+            while(new_table[idx].getKey() != "") {
+                idx++;
+                if(idx >= new_capacity) {idx = 0;}
+            }
+            new_table[idx] = NodeV1(key, val);
+            length.fetchAdd(1);
         }
         capacity = new_capacity;
         lock_table = ArrayList<ReentrantMutex>(Int64(capacity), {x : Int64 => ReentrantMutex()});
@@ -265,5 +266,431 @@ class KeyValueV1 <: CustomMap  {
         length.store(0);
         table = ArrayList<NodeV1>(capacity, {x : Int64 => NodeV1("", 0)});
         new_table = ArrayList<NodeV1>(1, {x : Int64 => NodeV1("", 0)});
+    }
+}
+
+
+class KeyValueV1p1 <: CustomMap {
+    private var init_capacity: Int64;
+    private var capacity: Int64;
+    public let length = AtomicInt64(0);
+    private var load_factor: Float32;
+    private var expansion_rate: Float32;
+    private var table : ArrayList<NodeV1>;
+    private var lock_table : ArrayList<ReentrantMutex>;
+    private var currently_expanding = AtomicBool(false);
+
+
+    KeyValueV1p1(init_capacity! : Int64 = 8
+            , load_factor! : Float32 = 0.5
+            , expansion_rate! : Float32 = 2.0) {
+        this.init_capacity = init_capacity;
+        capacity = init_capacity;
+        this.load_factor = load_factor;
+        this.expansion_rate = expansion_rate;
+
+        table = ArrayList<NodeV1>(capacity, {x : Int64 => NodeV1("", 0)});
+        // new_table = ArrayList<NodeV1>(1, {x : Int64 => NodeV1("", 0)});
+        lock_table = ArrayList<ReentrantMutex>(capacity, {x : Int64 => ReentrantMutex()});
+    }
+
+    public func expand() : Unit {
+        var new_capacity = Int64(Float32(capacity) * expansion_rate);
+        length.store(0);
+
+        let new_table = ArrayList<NodeV1>(new_capacity, {x : Int64 => NodeV1("", 0)});
+
+        for(i in 0..table.size) {
+            let item = table[i]
+            if (item.getKey() == "") { continue }
+            var key = item.getKey();
+            var val = item.getValue();
+            var idx: Int64 = Int64(hash_function(key) % UInt64(new_capacity));
+            while(new_table[idx].getKey() != "") {
+                idx++;
+                if(idx >= new_capacity) {idx = 0;}
+            }
+            new_table[idx] = NodeV1(key, val);
+            length.fetchAdd(1);
+        }
+        capacity = new_capacity;
+        table = new_table;
+        lock_table = ArrayList<ReentrantMutex>(capacity, {x : Int64 => ReentrantMutex()});
+    }
+
+    private func lookUpBucket(k: String): Int64 {
+        var idx: Int64 = Int64(hash_function(k) % UInt64(capacity));
+        return idx;
+    }
+
+    public func put(k: String, v: Int64): Unit {
+        while(currently_expanding.load()){}
+        var bucket_idx = lookUpBucket(k);
+
+        while(true) {
+            if(acquire_lock2(bucket_idx)) {
+                if(table[bucket_idx].getKey() == "") {                    
+                    break;
+                }
+                if (table[bucket_idx].getKey() == k) {
+                    table[bucket_idx].setValue(v);
+                    release_lock2(bucket_idx);
+                    return;
+                }
+                release_lock2(bucket_idx);
+                bucket_idx++;
+                if(bucket_idx >= capacity) {bucket_idx = 0;}
+            }
+        }
+        table[bucket_idx] = NodeV1(k, v);
+        release_lock2(bucket_idx);
+        let len = length.fetchAdd(1);
+
+        if((Float32(len) + 1.0) > Float32(capacity) * load_factor) {
+            trigger_expand();
+        }
+
+        return
+    }
+
+    public func trigger_expand() {
+        if(currently_expanding.compareAndSwap(false, true)){
+            expand();
+            currently_expanding.store(false);
+        }        
+    }
+
+    private func acquire_lock2(idx : Int64) : Bool {
+        return lock_table[idx].tryLock();
+    }
+
+    private func release_lock2(idx : Int64) {
+        lock_table[idx].unlock();
+    }
+
+    public func get(k: String): Option<Int64> {
+        while(currently_expanding.load()){}
+
+        var bucket_idx = lookUpBucket(k);
+
+        while(true) {
+            if(acquire_lock2(bucket_idx)) {
+                if(table[bucket_idx].getKey() == "") {
+                    release_lock2(bucket_idx);
+                    return None;
+                }
+                if (table[bucket_idx].getKey() == k) {
+                    let out = table[bucket_idx].getValue();
+                    release_lock2(bucket_idx);
+                    return out;
+                }
+                release_lock2(bucket_idx);
+                bucket_idx++;
+                if(bucket_idx >= capacity) {bucket_idx = 0;}
+            }
+        }
+        return None;
+    }
+    public func getKeys() : ArrayList<String> {
+        let res = ArrayList<String>()
+        for(item in table) {
+            if (item.getKey() == "") { continue }
+            res.append(item.getKey())
+        }
+        return res
+    }
+    public func serialize(): String {
+        var output = StringBuilder(16000000)
+        for (key in getKeys()) {
+            output.append(key)
+            output.append(' ')
+            output.append(get(key).getOrThrow())
+            output.append('\n')
+        }
+        return output.toString()
+    }
+    public func new_deserialize(lines: ArrayList<String>): Unit {
+        for (split in lines) {
+            let words = split.split(" ")
+            if(words.size == 3) {
+                let key = words[1]
+                let value = Int64.parse(words[2])
+                put(key, value);
+            } else {
+                let key = words[1]
+                get(key);
+            }
+        }
+    }
+	
+    public static func deserialize(str: String): KeyValueV1p1 {
+        let splits = str.split("\n", removeEmpty: true)
+        let keyValue = KeyValueV1p1()
+
+        var node: Option<NodeV1> = None
+
+        for (split in splits) {
+            let words = split.split(" ")
+            let key = words[0]
+            let value = Int64.parse(words[1])
+
+            keyValue.put(key, value)
+        }
+        return keyValue
+    }
+
+    public func get_capacity() : Int64 {
+        return capacity;
+    }
+    public func get_size() : Int64 {
+        return length.load();
+    }
+    public func clear() : Unit {
+        if(currently_expanding.compareAndSwap(false, true)){
+            capacity = init_capacity;
+            length.store(0);
+            table = ArrayList<NodeV1>(capacity, {x : Int64 => NodeV1("", 0)});
+            lock_table = ArrayList<ReentrantMutex>(capacity, {x : Int64 => ReentrantMutex()});
+            currently_expanding.store(false);
+        }
+    }
+    @OverflowWrapping
+    private func hash_function(s: String): UInt64 {
+        let offset: UInt64 = 14695981039346656037;
+        let prime: UInt64 = 1099511628211;
+        var hash_value: UInt64 = offset;
+        for (c in s) {
+            hash_value ^= UInt64(UInt32(c));
+            hash_value *= prime;
+        }
+        return hash_value;
+    }
+}
+
+
+class KeyValueV1p1Debug <: CustomMap {
+    private var init_capacity: Int64;
+    private var capacity: Int64;
+    public let length = AtomicInt64(0);
+    private var load_factor: Float32;
+    private var expansion_rate: Float32;
+    private var table : ArrayList<NodeV1>;
+    // private var new_table : ArrayList<NodeV1>;
+    private var lock_table : ArrayList<ReentrantMutex>;
+    private var currently_expanding = AtomicBool(false);
+
+    private var thread_tracker : ArrayList<AtomicInt64>;
+    // private var thread_count_within_critical = AtomicInt64(0);
+
+    KeyValueV1p1Debug(init_capacity! : Int64 = 8
+            , load_factor! : Float32 = 0.5
+            , expansion_rate! : Float32 = 2.0) {
+        this.init_capacity = init_capacity;
+        capacity = init_capacity;
+        this.load_factor = load_factor;
+        this.expansion_rate = expansion_rate;
+
+        table = ArrayList<NodeV1>(capacity, {x : Int64 => NodeV1("", 0)});
+        // new_table = ArrayList<NodeV1>(1, {x : Int64 => NodeV1("", 0)});
+        lock_table = ArrayList<ReentrantMutex>(capacity, {x : Int64 => ReentrantMutex()});
+        thread_tracker = ArrayList<AtomicInt64>(capacity, {x : Int64 => AtomicInt64(-1)});
+    }
+
+    public func expand() : Unit {
+        var new_capacity = Int64(Float32(capacity) * expansion_rate);
+        length.store(0);
+
+        let new_table = ArrayList<NodeV1>(new_capacity, {x : Int64 => NodeV1("", 0)});
+
+        // if(thread_count_within_critical.load() > 1) {
+        //     println("Expanding with thread_count_within_critical = ${thread_count_within_critical.load()}")
+        // }
+
+        for(i in 0..table.size) {
+            let item = table[i]
+            if (item.getKey() == "") { continue }
+            var key = item.getKey();
+            var val = item.getValue();
+            var idx: Int64 = Int64(hash_function(key) % UInt64(new_capacity));
+            while(new_table[idx].getKey() != "") {
+                idx++;
+                if(idx >= new_capacity) {idx = 0;}
+            }
+            new_table[idx] = NodeV1(key, val);
+            length.fetchAdd(1);
+        }
+        capacity = new_capacity;
+        table = new_table;
+        lock_table = ArrayList<ReentrantMutex>(capacity, {x : Int64 => ReentrantMutex()});
+        thread_tracker = ArrayList<AtomicInt64>(capacity, {x : Int64 => AtomicInt64(-1)});
+        // new_table = ArrayList<NodeV1>(capacity * expansion_rate, {x : Int64 => NodeV1("", 0)});
+    }
+
+    private func lookUpBucket(k: String): Int64 {
+        var idx: Int64 = Int64(hash_function(k) % UInt64(capacity));
+        return idx;
+    }
+
+    public func put(k: String, v: Int64): Unit {
+        while(currently_expanding.load()){}
+        var bucket_idx = lookUpBucket(k);
+
+        while(true) {
+            // if(lock_table[bucket_idx].tryLock()) {
+            if(acquire_lock2(bucket_idx)) {
+                if(table[bucket_idx].getKey() == "") {                    
+                    break;
+                }
+                if (table[bucket_idx].getKey() == k) {
+                    table[bucket_idx].setValue(v);
+                    // lock_table[bucket_idx].unlock();
+                    release_lock2(bucket_idx);
+                    return;
+                }
+                // lock_table[bucket_idx].unlock();
+                release_lock2(bucket_idx);
+                bucket_idx++;
+                if(bucket_idx >= capacity) {bucket_idx = 0;}
+            }
+        }
+        table[bucket_idx] = NodeV1(k, v);
+        // lock_table[bucket_idx].unlock();
+        release_lock2(bucket_idx);
+        let len = length.fetchAdd(1);
+
+        if((Float32(len) + 1.0) > Float32(capacity) * load_factor) {
+            trigger_expand();
+        }
+
+        return
+    }
+
+    public func trigger_expand() {
+        if(currently_expanding.compareAndSwap(false, true)){
+            expand();
+            currently_expanding.store(false);
+        }        
+    }
+
+    private func acquire_lock2(idx : Int64) : Bool {
+        let status = lock_table[idx].tryLock()
+        thread_tracker[idx].store(Thread.currentThread.id);
+        // thread_count_within_critical.fetchAdd(1);
+        return status
+    }
+
+    private func release_lock2(idx : Int64) {
+        try {
+            lock_table[idx].unlock();
+            thread_tracker[idx].store(-1);
+            // thread_count_within_critical.fetchSub(1);
+            return;
+        } catch (e : IllegalSynchronizationStateException) {
+            println("${Thread.currentThread.id} trying to unlock. Lock held by ${thread_tracker[idx].load()}\n${e}")
+        }
+    }
+
+    public func get(k: String): Option<Int64> {
+        while(currently_expanding.load()){}
+
+        var bucket_idx = lookUpBucket(k);
+
+        while(true) {
+            // if(lock_table[bucket_idx].tryLock()) {
+            if(acquire_lock2(bucket_idx)) {
+                if(table[bucket_idx].getKey() == "") {
+                    // lock_table[bucket_idx].unlock();
+                    release_lock2(bucket_idx);
+                    return None;
+                }
+                if (table[bucket_idx].getKey() == k) {
+                    let out = table[bucket_idx].getValue();
+                    // lock_table[bucket_idx].unlock();
+                    release_lock2(bucket_idx);
+                    return out;
+                }
+                // lock_table[bucket_idx].unlock();
+                release_lock2(bucket_idx);
+                bucket_idx++;
+                if(bucket_idx >= capacity) {bucket_idx = 0;}
+            }
+        }
+        return None;
+    }
+    public func getKeys() : ArrayList<String> {
+        let res = ArrayList<String>()
+        for(item in table) {
+            if (item.getKey() == "") { continue }
+            res.append(item.getKey())
+        }
+        return res
+    }
+    public func serialize(): String {
+        var output = StringBuilder(16000000)
+        for (key in getKeys()) {
+            output.append(key)
+            output.append(' ')
+            output.append(get(key).getOrThrow())
+            output.append('\n')
+        }
+        return output.toString()
+    }
+    public func new_deserialize(lines: ArrayList<String>): Unit {
+        for (split in lines) {
+            let words = split.split(" ")
+            if(words.size == 3) {
+                let key = words[1]
+                let value = Int64.parse(words[2])
+                put(key, value);
+            } else {
+                let key = words[1]
+                get(key);
+            }
+        }
+    }
+	
+    public static func deserialize(str: String): KeyValueV1p1Debug {
+        let splits = str.split("\n", removeEmpty: true)
+        let keyValue = KeyValueV1p1Debug()
+
+        var node: Option<NodeV1> = None
+
+        for (split in splits) {
+            let words = split.split(" ")
+            let key = words[0]
+            let value = Int64.parse(words[1])
+
+            keyValue.put(key, value)
+        }
+        return keyValue
+    }
+
+    public func get_capacity() : Int64 {
+        return capacity;
+    }
+    public func get_size() : Int64 {
+        return length.load();
+    }
+    public func clear() : Unit {
+        if(currently_expanding.compareAndSwap(false, true)){
+            capacity = init_capacity;
+            length.store(0);
+            table = ArrayList<NodeV1>(capacity, {x : Int64 => NodeV1("", 0)});
+            lock_table = ArrayList<ReentrantMutex>(capacity, {x : Int64 => ReentrantMutex()});
+            currently_expanding.store(false);
+            thread_tracker = ArrayList<AtomicInt64>(capacity, {x : Int64 => AtomicInt64(-1)});
+            // thread_count_within_critical.store(0);
+        }
+    }
+    @OverflowWrapping
+    private func hash_function(s: String): UInt64 {
+        let offset: UInt64 = 14695981039346656037;
+        let prime: UInt64 = 1099511628211;
+        var hash_value: UInt64 = offset;
+        for (c in s) {
+            hash_value ^= UInt64(UInt32(c));
+            hash_value *= prime;
+        }
+        return hash_value;
     }
 }
