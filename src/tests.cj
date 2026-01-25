@@ -9,63 +9,7 @@ import std.fs.*
 import std.io.SeekPosition
 import std.collection.*
 import std.random.*
-
-
-
-func generate_linearizability_history(nthreads : Int64, ops_per_thread : Int64, num_of_keys : Int64) {
-
-    let map = HashMap<String, Int64>()
-
-    let list = ArrayList<Future<Unit>>()
-    var keys = ArrayList<String>();
-    let output_lock = ReentrantMutex();
-
-    for(i in 0..num_of_keys) {
-        keys.append(Random().nextInt8().toString());
-    }
-    let new_keys = keys;
-
-    // create 4 threads.
-    for (i in 0..nthreads) {
-        let fut = spawn {
-            var op_counter = 0;
-            let ops = ArrayList<String>(["get", "set"]);
-            for(_ in 0..ops_per_thread) {
-                var now = DateTime.now().nanosecond;
-                var op = ops[now % 2];
-                var k = new_keys[now % num_of_keys];
-                if(op == "set") {
-                    var v = Random().nextInt8();
-                    var start = DateTime.now().nanosecond;;
-                    map.put(k, Int64(v));
-                    var end = DateTime.now().nanosecond;;
-                    synchronized(output_lock) {
-                        println("id=${op_counter}, thr=${Thread.currentThread.id}, ${op}(${k},${v}) -> {ok}, [${start},${end}])");
-                        op_counter++;
-                    }
-                    sleep(400 * Duration.nanosecond)
-                } else {
-                    var start = DateTime.now().nanosecond;;
-                    var v = map.get(k);
-                    var end = DateTime.now().nanosecond;;
-                    synchronized(output_lock) {
-                        println("id=${op_counter}, thr=${Thread.currentThread.id}, ${op}(${k},None) -> ${v}, [${start},${end}])");
-                        op_counter++;
-                    }
-                    sleep(150 * Duration.nanosecond)
-                }
-                sleep(200 * Duration.nanosecond)
-            }
-        }
-        list.append(fut)
-    }
-
-    // Wait for all threads finished.
-    for (f in list) {
-        f.get()
-    }
-}
-
+import std.math.*
 
 
 open class DeadlockException <: Exception {
@@ -87,6 +31,7 @@ class HashMapTests {
     private let performanceTests = HashMap<String, () -> Unit>()
     private let serialTests = HashMap<String, () -> Unit>()
     private let parallelTests = HashMap<String, () -> Unit>()
+    private let correctnessTests = HashMap<String, () -> Unit>()
 
     private let map: CustomMap;
 
@@ -107,6 +52,7 @@ class HashMapTests {
             return a;
         }
 
+        concatenate_maps(allTests, correctnessTests);
         concatenate_maps(allTests, performanceTests);
         concatenate_maps(allTests, serialTests);
         concatenate_maps(allTests, parallelTests);
@@ -144,93 +90,6 @@ class HashMapTests {
         }
     }
 
-
-    private func parallelStressTest(n!: Int64 = 100, nthreads!: Int64 = 4, sleep_gap!: Int64 = 500) {
-
-        let init_actions = readFileToArrayList("samples/init_actions.txt");
-        if(init_actions.size == 0) {
-            return;
-        }
-
-        let next_actions = readFileToArrayList("samples/actions.txt");
-        if(next_actions.size == 0) {
-            return;
-        }
-
-        let my_mtx = ReentrantMutex()
-
-        for (idx in 0..n) {
-            let my_list = ArrayList<Future<Unit>>()
-            let count_atomic = AtomicInt64(0);
-            let current_threads = ArrayList<Int64>(nthreads, {x : Int64 => 0})
-            let workdone = HashMap<Int64, Int64>();
-
-            let watchdog_thread = spawn {
-                let previous_workdone = HashMap<Int64, Int64>();
-                while((checkIfAnyZero(current_threads) || workdone.size != nthreads)) {
-                    sleep(20 * Duration.millisecond);
-                }
-                for(t in current_threads) {
-                    previous_workdone.put(t, 0);
-                }
-
-                while(count_atomic.load() < next_actions.size) {
-                    sleep(200 * Duration.millisecond);
-                    for(t in current_threads) {
-                        if(previous_workdone.get(t) == workdone.get(t)) {
-                            sleep(500 * Duration.millisecond);
-                            if(previous_workdone.get(t) == workdone.get(t)) {
-                                throw DeadlockException("Deadlock detected in thread id ${t}, Workdone did not progress beyond ${workdone[t]}!")
-                                return
-                            }                            
-                        } else {
-                            previous_workdone[t] = workdone[t];
-                        }
-                    }
-                }
-            }
-
-            my_list.append(watchdog_thread);
-            
-            map.new_deserialize(init_actions);
-
-            for (i in 0..nthreads) {
-                let fut = spawn {
-                    my_mtx.lock()
-                    workdone.put(Thread.currentThread.id,0);
-                    current_threads[i] = Thread.currentThread.id;
-                    my_mtx.unlock()
-                    while(true) {
-                        my_mtx.lock()
-                        if (count_atomic.load() >= next_actions.size) {
-                            my_mtx.unlock()
-                            break  
-                        }
-                        let words = next_actions[count_atomic.load()].split(" ");
-                        count_atomic.fetchAdd(1);
-                        workdone[Thread.currentThread.id]++;
-                        my_mtx.unlock()
-                        if(words.size == 3) {
-                            let key = words[1];
-                            let value = Int64.parse(words[2]);
-                            map.put(key, value);
-                        } else {
-                            let key = words[1];
-                            map.get(key);
-                        }
-                    }
-                }
-                my_list.append(fut)
-            }
-
-            for (f in my_list) {
-                f.get();
-            }
-
-            map.clear();
-        }
-    }
-
     private func getOperationTimes(n!: Int64 = 10) {
 
         let put_operations = readFileToArrayList("samples/put_operations.txt");
@@ -243,7 +102,7 @@ class HashMapTests {
             return;
         }
 
-        var time = 0;
+        var time : Int64 = 0;
         map.clear();
 
         for (idx in 0..n) {
@@ -334,8 +193,55 @@ class HashMapTests {
 
         println("\tMixed Operation average time: \t${time / ((init_actions.size + next_actions.size) * n)} ns")
         println("\tMy Hashmap total time: \t\t${(Float32(time / n)/1e6)} ms")
-    }
 
+        map.clear();
+
+        start_op = MonoTime.now();
+
+        for (idx in 0..n) {
+            if(idx == 0) {
+                for (split in init_actions) {
+                    let words = split.split(" ")
+                    if(words.size == 3) {
+                        let key = words[1]
+                        let value = Int64.parse(words[2])
+                        // start_op = MonoTime.now();
+                        map.put(key, value);
+                        // end_op = MonoTime.now();
+                        // time += (end_op - start_op).toNanoseconds();
+                    } else {
+                        let key = words[1]
+                        // start_op = MonoTime.now();
+                        map.get(key);
+                        // end_op = MonoTime.now();
+                        // time += (end_op - start_op).toNanoseconds();
+                    }
+                }
+            }
+            // for (op in next_actions) {
+            for (i in 0..next_actions.size) {
+                let op = next_actions[i]
+                let words = op.split(" ")
+                if(words.size == 3) {
+                    let key = words[1]
+                    let value = Int64.parse(words[2])
+                    map.put(key, value);
+                } else {
+                    let key = words[1]
+                    map.get(key);
+                }
+            }
+        }
+        end_op = MonoTime.now();
+        time += (end_op - start_op).toNanoseconds();
+
+
+        println("\tThroughput: \t\t\t${(Float64(init_actions.size + next_actions.size * n) / Float64(time)) / 1e-6} ops/ms")
+        // println("\tMy Hashmap total time: \t\t${(Float32(time / n)/1e6)} ms")
+
+        map.clear();
+
+    }
 
     private func parallelPerformanceTest(nthreads!: Int64 = 4, n! : Int64 = 10) {
 
@@ -528,4 +434,144 @@ class HashMapTests {
 
         map.clear();
     }
+
+    public func generate_linearizability_history(nthreads !: Int64 = 4, ops_per_thread !: Int64 = 100, num_of_keys !: Int64 = 8) {
+        // let map = HashMap<String, Int64>()
+
+        let list = ArrayList<Future<Unit>>()
+        var keys = ArrayList<String>();
+        let output_lock = ReentrantMutex();
+
+        for(i in 0..num_of_keys) {
+            keys.append(Random().nextInt8().toString());
+        }
+        let new_keys = keys;
+
+        // create 4 threads.
+        for (i in 0..nthreads) {
+            let fut = spawn {
+                var op_counter = 0;
+                let ops = ArrayList<String>(["get", "set"]);
+                for(_ in 0..ops_per_thread) {
+                    var op = ops[abs(Int64(Random().nextInt8())) % 2];
+                    var k = new_keys[abs(Int64(Random().nextInt8())) % num_of_keys];
+                    if(op == "set") {
+                        var v = Random().nextInt8();
+                        var start = DateTime.now().nanosecond;;
+                        map.put(k, Int64(v));
+                        var end = DateTime.now().nanosecond;;
+                        synchronized(output_lock) {
+                            println("id=${op_counter}, thr=${Thread.currentThread.id}, ${op}(${k},${v}) -> {ok}, [${start},${end}])");
+                            op_counter++;
+                        }
+                        // // sleep(400 * Duration.nanosecond)
+                        // sleep((Int64(abs(Random().nextInt8())) % 100) * Duration.nanosecond)
+                    } else {
+                        var start = DateTime.now().nanosecond;;
+                        var v = map.get(k);
+                        var end = DateTime.now().nanosecond;;
+                        synchronized(output_lock) {
+                            println("id=${op_counter}, thr=${Thread.currentThread.id}, ${op}(${k},None) -> ${v}, [${start},${end}])");
+                            op_counter++;
+                        }
+                        // // sleep(150 * Duration.nanosecond)
+                        // sleep((Int64(abs(Random().nextInt8())) % 100) * Duration.nanosecond)
+                    }
+                    // sleep((Int64(abs(Random().nextInt8())) % 100) * Duration.nanosecond)
+                }
+            }
+            list.append(fut)
+        }
+
+        // println("${Op(0, 0, "", "", 0, 0, 0, 0).toString()}")
+
+        // Wait for all threads finished.
+        for (f in list) {
+            f.get()
+        }
+
+        map.clear();
+    }
+
+    private func parallelStressTest(num_ops!: Int64 = 1000000, num_keys!: Int64 = 100000, n!: Int64 = 100, nthreads!: Int64 = 4) {
+
+        let ops = SampleGenerator(2, weights : ArrayList<Float64>([1.0, 9.0])).sampleN(num_ops)
+        let keys = generateUniqueStrings(num_keys, 8)
+        let values = ArrayList<Int64>(num_ops, {x : Int64 => Random().nextInt64(100)})
+
+        let sampler = SampleGenerator(num_keys, dist_fn : favor_early_exp_distribution)
+        let key_samples = sampler.sampleN(num_ops)
+
+        let my_mtx = ReentrantMutex()
+
+        for (idx in 0..n) {
+            let my_list = ArrayList<Future<Unit>>()
+            let count_atomic = AtomicInt64(0);
+            let current_threads = ArrayList<Int64>(nthreads, {x : Int64 => 0})
+            let workdone = HashMap<Int64, Int64>();
+
+            let watchdog_thread = spawn {
+                let previous_workdone = HashMap<Int64, Int64>();
+                while((checkIfAnyZero(current_threads) || workdone.size != nthreads)) {
+                    sleep(200 * Duration.millisecond);
+                }
+                for(t in current_threads) {
+                    previous_workdone.put(t, 0);
+                }
+
+                while(count_atomic.load() < num_ops) {
+                    sleep(1000 * Duration.millisecond);
+                    for(t in current_threads) {
+                        if(previous_workdone.get(t) == workdone.get(t)) {
+                            sleep(500 * Duration.millisecond);
+                            if(previous_workdone.get(t) == workdone.get(t)) {
+                                throw DeadlockException("Deadlock detected in thread id ${t}, Workdone did not progress beyond ${workdone[t]}!")
+                                return
+                            }                            
+                        } else {
+                            previous_workdone[t] = workdone[t];
+                        }
+                    }
+                }
+            }
+
+            my_list.append(watchdog_thread);
+
+            for (i in 0..nthreads) {
+                let fut = spawn {
+                    my_mtx.lock()
+                    workdone.put(Thread.currentThread.id,0);
+                    current_threads[i] = Thread.currentThread.id;
+                    my_mtx.unlock()
+                    while(true) {
+                        my_mtx.lock()
+                        let idx = count_atomic.load();
+                        if (idx >= num_ops) {
+                            my_mtx.unlock()
+                            break  
+                        }
+                        let op = ops[idx]
+                        count_atomic.fetchAdd(1);
+                        workdone[Thread.currentThread.id]++;
+                        my_mtx.unlock()
+                        if(op == 0) {
+                            let key = keys[key_samples[idx]]
+                            map.get(key);
+                        } else {
+                            let key = keys[key_samples[idx]]
+                            let val = values[idx]
+                            map.put(key, val);
+                        }
+                    }
+                }
+                my_list.append(fut)
+            }
+
+            for (f in my_list) {
+                f.get();
+            }
+            map.clear();
+        }
+    }
+
 }
