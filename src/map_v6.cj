@@ -2,7 +2,7 @@ package my_map
 
 import std.collection.ArrayList
 import std.sync.ReentrantMutex
-import std.convert.*
+import std.convert.Parsable
 import std.collection.*
 import std.sync.*
 
@@ -111,7 +111,7 @@ class TableV6 {
     }
 }
 
-
+// Closed chaining, lock in the bucket. Table is array of buckets. Buckets are linked list of Key Value Pairs
 class KeyValueV6 <: CustomMap {
 
     private var init_capacity: Int64;
@@ -121,8 +121,6 @@ class KeyValueV6 <: CustomMap {
     private var expansion_rate: Float32;
     private var expansion_threshold : Int64;
     public var table_ref : AtomicReference<TableV6>;
-    // public var new_capacity : Int64;
-    // public var new_table_ref : AtomicReference<TableV6>;
 
     public let currently_expanding = AtomicInt64(0);
     public let resize_lock = ReentrantMutex();
@@ -136,8 +134,6 @@ class KeyValueV6 <: CustomMap {
         this.expansion_rate = expansion_rate;
         this.table_ref = AtomicReference(TableV6(init_capacity));
         this.expansion_threshold = Int64(Float32(table_ref.load().capacity) * table_ref.load().load_factor);
-        // this.new_capacity = Int64(Float32(init_capacity) * table_ref.load().expansion_rate);
-        // this.new_table_ref = AtomicReference(TableV6(new_capacity));
     }
 
     public func put(k: String, v: Int64): Unit {

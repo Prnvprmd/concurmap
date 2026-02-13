@@ -114,15 +114,6 @@ class KeyValueV2p1 <: CustomMap {
         // println("Released Lock2 for ${idx}");
     }
 
-
-
-
-    private func compare(a: String, b: String): Int64 {
-        if (a == b) { return 0 }
-        if (a < b) { return -1 }
-        return 1
-    }
-
     public func expand() {
         var new_capacity = Int64(Float32(capacity) * expansion_rate);
         length.store(0);
@@ -158,7 +149,6 @@ class KeyValueV2p1 <: CustomMap {
         while(true) {
             acquire_lock2(bucket_idx);
             if(table[bucket_idx].getKey() == "") {
-                release_lock2(bucket_idx);
                 break;
             }
             if (table[bucket_idx].getKey() == k) {
@@ -170,10 +160,9 @@ class KeyValueV2p1 <: CustomMap {
             bucket_idx++;
             if(bucket_idx >= capacity) {bucket_idx = 0;}
         }
-        acquire_lock2(bucket_idx);
         table[bucket_idx] = NodeV1(k, v);
-        length.fetchAdd(1);
         release_lock2(bucket_idx);
+        length.fetchAdd(1);
 
         maybe_trigger_expand();
 

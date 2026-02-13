@@ -93,6 +93,7 @@ class BucketV4p1 {
 }
 
 class TableV4p1 {
+    public var init_capacity: Int64 = 8;
     public var capacity: Int64 = 8;
     public var load_factor: Float32;
     public var expansion_rate: Float32;
@@ -102,12 +103,13 @@ class TableV4p1 {
             , load_factor! : Float32 = 0.5
             , expansion_rate! : Float32 = 2.0) {
         buckets = ArrayList<BucketV4p1>(init_capacity, {x : Int64 => BucketV4p1()});
+        this.init_capacity = init_capacity;
         this.capacity = init_capacity;
         this.load_factor = load_factor;
         this.expansion_rate = expansion_rate;
     }
     public func clear() {
-        buckets = ArrayList<BucketV4p1>(1, {x : Int64 => BucketV4p1()});
+        buckets = ArrayList<BucketV4p1>(init_capacity, {x : Int64 => BucketV4p1()});
     }
 }
 
@@ -150,7 +152,7 @@ class KeyValueV4p1 <: CustomMap {
         var node = bucket0.head_ref.load();
         while(let Some(NodeV4p1Ref) <- node) {
             if(node.getOrThrow().get().getKey() == k){
-                bucket0.lock.lock();
+                bucket0.lock.unlock();
                 return node.getOrThrow().get().getValue();
             }
             node = node.getOrThrow().getNext();
@@ -168,7 +170,7 @@ class KeyValueV4p1 <: CustomMap {
             node = bucket1.head_ref.load();
             while(let Some(NodeV4p1Ref) <- node) {
                 if(node.getOrThrow().get().getKey() == k){
-                    bucket1.lock.lock();
+                    bucket1.lock.unlock();
                     return node.getOrThrow().get().getValue();
                 }
                 node = node.getOrThrow().getNext();
@@ -342,8 +344,17 @@ class KeyValueV4p1 <: CustomMap {
 
 
     public func clear() : Unit {
-        table_ref.load().clear();
-        new_table_ref.load().clear();
+        var oldT = table_ref.load();
+        var newT = new_table_ref.load();
+
+        for(bucket in oldT.buckets) {
+            if(bucket.isEmpty()) { continue; }
+            bucket.clear();
+        }
+        for(bucket in newT.buckets) {
+            if(bucket.isEmpty()) { continue; }
+            bucket.clear();
+        }
         table_ref.store(TableV4p1(init_capacity));
         expansion_threshold = Int64(Float32(init_capacity) * table_ref.load().load_factor);
         new_capacity = Int64(Float32(init_capacity) * table_ref.load().expansion_rate);
