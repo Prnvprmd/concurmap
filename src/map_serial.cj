@@ -4,6 +4,7 @@ import std.collection.ArrayList
 import std.sync.ReentrantMutex
 import std.convert.*
 import std.collection.*
+import std.collection.concurrent.*
 
 
 
@@ -199,5 +200,65 @@ class KeyValueSerial <: CustomMap {
         length = 0;
         table = ArrayList<Node>(capacity, {x : Int64 => Node("", 0)});
         new_table = ArrayList<Node>(capacity * expansion_rate, {x : Int64 => Node("", 0)});
+    }
+}
+
+
+class KeyValueConcurMap <: CustomMap {
+
+    let map = ConcurrentHashMap<String, Int64>(8, concurrencyLevel : 4)
+
+    public func expand() {
+        return;
+    }
+    public func put(k: String, v: Int64) : Unit {
+        map.put(k, v);
+        return;
+    }
+
+    public func get(k: String): Option<Int64> {
+        return map.get(k)
+    }
+
+    public func serialize(): String {
+        var output = StringBuilder(16000000)
+        for ((key,val) in map) {
+            output.append(key)
+            output.append(' ')
+            output.append(get(key).getOrThrow())
+            output.append('\n')
+        }
+        return output.toString()        
+    }
+
+    public func new_deserialize(lines: ArrayList<String>): Unit {
+        for (split in lines) {
+            let words = split.split(" ")
+            if(words.size == 3) {
+                let key = words[1]
+                let value = Int64.parse(words[2])
+                put(key, value);
+            } else {
+                let key = words[1]
+                get(key);
+            }
+        }
+    }
+
+    public func get_capacity() : Int64 {
+        return 0;
+    }
+    public func get_size() : Int64 {
+        return 0;
+    }
+    public func getKeys(): ArrayList<String> {
+        return ArrayList<String>();
+    }
+    public func trigger_expand() : Unit {
+        return;
+    }
+
+    public func clear() : Unit {
+        return;
     }
 }
